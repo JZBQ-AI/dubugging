@@ -2,23 +2,21 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
-
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
-#include <zephyr/drivers/i2c.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/util.h>
+#include "I2C.h"
+#include "hardware.h"
+
 //引脚定义
 #define CSB_PIN   8   /* P0.08：CSB/I2C_SEL，高 = I2C 模式 */
 #define ADDR_PIN  6   /* P0.06：SDO/ADDR，I2C 地址选择脚（不是 P0.04！） */
 #define INT_PIN   11  /* P0.11：INT，本程序不用 */
 #define LED_PIN   15  /* P1.15：板载 LED */
 #define AFE_ADDR  0x69u 
-
-
 static const struct device *const gpio0_dev = DEVICE_DT_GET(DT_NODELABEL(gpio0));
 static const struct device *const gpio1_dev = DEVICE_DT_GET(DT_NODELABEL(gpio1));
-static struct i2c_dt_spec afe_bus = I2C_DT_SPEC_GET(DT_NODELABEL(afe));
 
 //MAX30009 寄存器定义
 #define REG_STATUS1     0x00u
@@ -194,61 +192,12 @@ static const uint8_t dump_regs[] = {
 };
 
 /* =============================================================================
- * 5. 传输层
- * =============================================================================
- * nRF 的 TWIM 把 ADDRESS_NACK / DATA_NACK 统一返回 -EIO，所以 -5 只说明
- * "这一笔没被 ACK"，不区分是地址没人应答还是数据被拒绝。
- */
-
-/*
- * 有的 Maxim 器件不接受 repeated START，要求"写寄存器地址 → STOP → 再读"。
- * 先按标准 repeated START 读，失败就退回两段式再试一次，成功就记住这个选择。
- * 这样日志里能直接看出是不是时序问题。
- */
-static bool split_read;
-
-static int reg_read(uint8_t reg, uint8_t *buf, size_t len)
-{
-	int ret;
-	if (!split_read) {
-		ret = i2c_burst_read_dt(&afe_bus, reg, buf, len);
-		if (ret == 0) {
-			return 0;
-		}
-		if (i2c_write_dt(&afe_bus, &reg, 1) == 0 && i2c_read_dt(&afe_bus, buf, len) == 0) 
-		{
-			split_read = true;
-			printk("MAX30009: 该器件要 write+STOP+read，后续都用两段式\n");
-			return 0;
-		}
-		return ret;
-	}
-	ret = i2c_write_dt(&afe_bus, &reg, 1);
-	if (ret < 0) {
-		return ret;
-	}
-	return i2c_read_dt(&afe_bus, buf, len);
-}
-
-static int reg_write(uint8_t reg, uint8_t value)
-{
-	uint8_t b[2] = {reg, value};
-
-	return i2c_write_dt(&afe_bus, b, sizeof(b));
-}
-
-static bool bus_ready(void)
-{
-	return i2c_is_ready_dt(&afe_bus);
-}
-
-/* =============================================================================
  * 6. 读写封装
  * =============================================================================
  */
 static int max30009_write(uint8_t reg, uint8_t value)
 {
-	int ret = reg_write(reg, value);
+	int ret = max30009_i2c_write(reg, value);
 
 	if (ret < 0) {
 		printk("MAX30009: write 0x%02X=0x%02X failed (%d)\n", reg, value, ret);
@@ -262,13 +211,13 @@ static int max30009_write_checked(uint8_t reg, uint8_t value)
 	uint8_t back = 0;
 	int ret;
 
-	ret = reg_write(reg, value);
+	ret = max30009_i2c_write(reg, value);
 	if (ret < 0) {
 		printk("MAX30009: write 0x%02X=0x%02X failed (%d)\n", reg, value, ret);
 		return ret;
 	}
 
-	ret = reg_read(reg, &back, 1);
+	ret = max30009_i2c_read(reg, &back, 1);
 	if (ret < 0) {
 		printk("MAX30009: readback 0x%02X failed (%d)\n", reg, ret);
 		return ret;
@@ -287,7 +236,7 @@ static void max30009_dump(void)
 
 	printk("---- register dump ----\n");
 	for (size_t n = 0; n < ARRAY_SIZE(dump_regs); n++) {
-		ret = reg_read(dump_regs[n], &v, 1);
+		ret = max30009_i2c_read(dump_regs[n], &v, 1);
 		if (ret < 0) {
 			printk("0x%02X=ERR  ", dump_regs[n]);
 		} else {
@@ -343,8 +292,8 @@ static int try_addresses(int addr_level)
 	uint8_t id = 0;
 	gpio_pin_set(gpio0_dev, ADDR_PIN, addr_level);   /* ADDR=1 → 0x69 */
 	k_msleep(2);
-	afe_bus.addr = AFE_ADDR;
-	if (reg_read(REG_PART_ID, &id, 1) == 0 && id == PART_ID_EXPECTED) 
+	max30009_i2c_set_addr(AFE_ADDR);
+	if (max30009_i2c_read(REG_PART_ID, &id, 1) == 0 && id == PART_ID_EXPECTED)
 	{
 		printk("MAX30009: 找到！ADDR=%d, 地址 0x%02X, PART_ID=0x%02X\n",
 		       addr_level, AFE_ADDR, id);
@@ -399,7 +348,7 @@ static int max30009_init(void)
 		printk("MAX30009: 软复位失败 (%d)\n", ret);
 		return ret;
 	}
-	ret = reg_read(REG_PART_ID, &id, 1);
+	ret = max30009_i2c_read(REG_PART_ID, &id, 1);
 	if (ret < 0 || id != PART_ID_EXPECTED) 
 	{
 		printk("MAX30009: 复位后 PART_ID 异常 (0x%02X, ret=%d)\n", id, ret);
@@ -430,7 +379,7 @@ static int max30009_init(void)
 		return ret;
 	}
 	k_msleep(200);
-	ret = reg_read(REG_STATUS1, &s1, 1);
+	ret = max30009_i2c_read(REG_STATUS1, &s1, 1);
 	if (ret < 0) {
 		return ret;
 	}
@@ -438,7 +387,7 @@ static int max30009_init(void)
 	if ((s1 & (ST1_FREQ_LOCK | ST1_PHASE_LOCK)) !=
 	    (ST1_FREQ_LOCK | ST1_PHASE_LOCK)) {
 		k_msleep(800);
-		ret = reg_read(REG_STATUS1, &s1, 1);
+		ret = max30009_i2c_read(REG_STATUS1, &s1, 1);
 		if (ret < 0) {
 			return ret;
 		}
@@ -457,7 +406,7 @@ static int max30009_init(void)
 	k_msleep(5);
 	ret = max30009_write_checked(REG_BIOZ_CFG1, BIOZ1_RUN);
 	uint8_t v = 0;
-	reg_read(REG_BIOZ_CFG1, &v, 1);
+	max30009_i2c_read(REG_BIOZ_CFG1, &v, 1);
 	printk("BIOZ_CFG1=0x%02X (expect 0x37)\n", v);
 	if (ret < 0) {
 		return ret;
@@ -491,11 +440,11 @@ static int max30009_read(struct bioz_block *out)
 	uint16_t words, n;
 	int ret;
 	memset(out, 0, sizeof(*out));
-	ret = reg_read(REG_FIFO_CNT1, &cnt1, 1);
+	ret = max30009_i2c_read(REG_FIFO_CNT1, &cnt1, 1);
 	if (ret < 0) {
 		return ret;
 	}
-	ret = reg_read(REG_FIFO_CNT2, &cnt2, 1);
+	ret = max30009_i2c_read(REG_FIFO_CNT2, &cnt2, 1);
 	if (ret < 0) {
 		return ret;
 	}
@@ -508,7 +457,7 @@ static int max30009_read(struct bioz_block *out)
 		return -EOVERFLOW;
 	}
 	n = MIN(words, FIFO_READ_MAX_WORDS);
-	ret = reg_read(REG_FIFO_DATA, fifo_raw, (size_t)n * FIFO_BYTES_PER_SAMPLE);
+	ret = max30009_i2c_read(REG_FIFO_DATA, fifo_raw, (size_t)n * FIFO_BYTES_PER_SAMPLE);
 	if (ret < 0) {
 		return ret;
 	}
@@ -530,11 +479,11 @@ static int max30009_read(struct bioz_block *out)
 			out->other_cnt++;
 		}
 	}
-	ret = reg_read(REG_STATUS1, &out->status1, 1);
+	ret = max30009_i2c_read(REG_STATUS1, &out->status1, 1);
 	if (ret < 0) {
 		return ret;
 	}
-	return reg_read(REG_STATUS2, &out->status2, 1);
+	return max30009_i2c_read(REG_STATUS2, &out->status2, 1);
 }
 
 /* 64 位整数开方，给 |Z| 用，避免 link libm */
@@ -570,6 +519,14 @@ int main(void)
 	uint32_t ok = 0, empty = 0, err = 0;
 	int ret;
 	printk("\n*** MAX30009 BioZ 测试（I2C）***\n");
+	ret = mux_init();
+	if (ret < 0) {
+		printk("MUX: init failed (%d)\n", ret);
+		while (1) {
+			k_sleep(K_FOREVER);
+		}
+	}
+	printk("MUX: E5->EL1, E7->EL2B, E6->EL3B, E8->EL4\n");
 	try_addresses(1);
 	ret = max30009_init();
 	if (ret < 0) 
