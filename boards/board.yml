@@ -1,6 +1,0 @@
-board:
-  name: nrf52840wtkj
-  full_name: WTKJ nrf52840 custom board
-  vendor: wtkj
-  socs:
-    - name: nrf52840

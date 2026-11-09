@@ -1,4 +1,26 @@
-/* For more help, browse the devicetree documentation at https://docs.zephyrproject.org/latest/build/dts/index.html
- * You can also visit the nRF DeviceTree extension documentation at https://docs.nordicsemi.com/bundle/nrf-connect-vscode/page/guides/ncs_configure_app.html#devicetree-support-in-the-extension
- */
+/* &i2c0 {
+	status = "okay";
+	clock-frequency = <I2C_BITRATE_STANDARD>;
 
+	ssd1306: ssd1306@3c {
+		compatible = "solomon,ssd1306";
+		reg = <0x3c>;
+		width = <128>;
+		height = <64>;
+
+		segment-offset = <0>;
+		page-offset = <0>;
+		display-offset = <0>;
+		multiplex-ratio = <63>;
+		segment-remap;
+		com-invdir;
+		prechargep = <0x22>;
+	};
+};
+
+/ {
+	chosen {
+		zephyr,display = &ssd1306;
+	};
+};
+ */

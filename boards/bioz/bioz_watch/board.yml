@@ -1,0 +1,6 @@
+board:
+  name: bioz_watch
+  full_name: BioZ Watch MDBT50Q-1MV2
+  vendor: others
+  socs:
+    - name: nrf52840

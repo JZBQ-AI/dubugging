@@ -1,0 +1,34 @@
+&pinctrl {
+    bioz_i2c_default: bioz_i2c_default {
+        group1 { psels = <NRF_PSEL(TWIM_SDA, 0, 4)>,
+                        <NRF_PSEL(TWIM_SCL, 1, 8)>; };
+    };
+    bioz_i2c_sleep: bioz_i2c_sleep {
+        group1 { psels = <NRF_PSEL(TWIM_SDA, 0, 4)>,
+                        <NRF_PSEL(TWIM_SCL, 1, 8)>; low-power-enable; };
+    };
+};
+
+/ {
+    zephyr,user {
+        /* 新增这两个控制脚 */
+        afe-csb-gpios  = <&gpio0 8 GPIO_ACTIVE_HIGH>;   /* I2C 模式 */
+        afe-addr-gpios = <&gpio0 6 GPIO_ACTIVE_HIGH>;   /* 高=0x69，低=0x54 */
+    };
+};
+
+&spi2 { status = "disabled"; };     /* 把 afe 子节点从这里删掉 */
+
+&i2c0 {
+    compatible = "nordic,nrf-twim";
+    status = "okay";
+    clock-frequency = <100000>;
+    pinctrl-0 = <&bioz_i2c_default>;
+    pinctrl-1 = <&bioz_i2c_sleep>;
+    pinctrl-names = "default", "sleep";
+
+    afe: max30009@69 {
+        compatible = "vnd,max30009";
+        reg = <0x69>;
+    };
+};

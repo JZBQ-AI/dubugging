@@ -1,655 +1,619 @@
-#include <stdio.h>
-#include <zephyr/kernel.h>
-#include <zephyr/drivers/gpio.h>
-
-//定义栈大小
-#define STACK_THREAD0_SIZE 512
-#define STACK_THREAD1_SIZE 512
-#define STACK_WORKER_SIZE 512
-
-//定义线程优先级
-#define THREAD0_PRIORITY 2
-#define THREAD1_PRIORITY 3
-#define WORKER_PRIORITY 4
-
-K_THREAD_STACK_DEFINE(my_stack_area, STACK_THREAD0_SIZE);
-struct k_work_q offload_work_q;//线程列队结构体
-struct k_work work;//工作项结构体
-
-void emulate_work(void)
-{
-    for (volatile int i = 0; i < 100000; i++);
-}
-void offload_function(struct k_work *work)
-{
-    uint64_t ts_start = k_uptime_get();
-    emulate_work();
-    int64_t work_run_time = k_uptime_delta(&ts_start);
-    printk("[WORKER] work execute time: %lld ms\n", work_run_time);
-}
-void thread0(void)
-{
-        //初始化
-    k_work_queue_start(&offload_work_q,my_stack_area,
-                       STACK_WORKER_SIZE,
-                       WORKER_PRIORITY,
-                       NULL);
-    k_work_init(&work, offload_function);
-    uint64_t time_stap;
-    int64_t delta_time;
-    while (1)
-    {
-        time_stap = k_uptime_get();
-        k_work_submit_to_queue(&offload_work_q, &work);
-        delta_time = k_uptime_delta(&time_stap);
-        printk("Thread 0 is running, delta time: %lld ms\n", delta_time);
-        k_msleep(20);
-    }
-}
-void thread1(void)
-{
-    uint64_t time_stap;
-    int64_t delta_time;
-    while (1)
-    {
-        time_stap = k_uptime_get();
-        emulate_work();
-        delta_time = k_uptime_delta(&time_stap);
-        printk("Thread 1 is running, delta time: %lld ms\n", delta_time);
-        k_msleep(20);
-    }
-}
-K_THREAD_DEFINE(thread0_id, STACK_THREAD0_SIZE, thread0, NULL, NULL, NULL, THREAD0_PRIORITY, 0, 0);     
-K_THREAD_DEFINE(thread1_id, STACK_THREAD1_SIZE, thread1, NULL, NULL, NULL, THREAD1_PRIORITY, 0, 0);
-
-
-
-
-/* //多线程学习
-#include <stdio.h>
-#include "zephyr/kernel.h"
-#include <zephyr/drivers/gpio.h>
-#include <zephyr/sys/atomic.h>
-#define STACKSIZE 1024	   // 栈大小
-#define THREAD0_PRIORITY 6 // 优先级高会打断优先级低
-#define THREAD1_PRIORITY 7 // 线程1 优先级
-#define LED_COUNT       2
-
-static const struct gpio_dt_spec leds[LED_COUNT] = {
-    GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios),
-    GPIO_DT_SPEC_GET(DT_ALIAS(led3), gpios),
-};
-void thread0()
-{
-    gpio_pin_configure_dt(&leds[0],GPIO_OUTPUT|GPIO_ACTIVE_LOW);
-    gpio_pin_set_dt(&leds[0],1);
-    gpio_pin_configure_dt(&leds[1],GPIO_OUTPUT|GPIO_ACTIVE_LOW);
-    gpio_pin_set_dt(&leds[1],1);
-	while (1)
-	{
-        
-        gpio_pin_toggle_dt(&leds[0]); // 翻转LED逻辑电平
-        gpio_pin_toggle_dt(&leds[1]);
-		printk("hello i am thread0\n");
-        k_msleep(1000); // 让出CPU，线程0进入就绪态
-	}
-}
- void thread1()
-{
-    gpio_pin_configure_dt(&leds[1],GPIO_OUTPUT|GPIO_ACTIVE_LOW);
-    gpio_pin_set_dt(&leds[1],1);
-	while (1)
-	{
-        gpio_pin_toggle_dt(&leds[1]); // 翻转LED逻辑电平
-		printk("hello i am thread1\n");
-        k_msleep(100); // 让出CPU，线程1进入就绪态
-	}
-} 
-// 静态方式创建线程
-K_THREAD_DEFINE(thread0_id, STACKSIZE, thread0, NULL, NULL, NULL, THREAD0_PRIORITY, 0, 0);
-K_THREAD_DEFINE(thread1_id, STACKSIZE, thread1, NULL, NULL, NULL, THREAD1_PRIORITY, 0, 0);
-
- int main(void)
-{
-	k_sleep(K_SECONDS(1));
-	return 0;
-}  */
-
-
-
-                    
-/* //加速度传感器 LIS2DH12 测试程序
 #include <errno.h>
+#include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
+
+#include <zephyr/device.h>
+#include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/util.h>
+//引脚定义
+#define CSB_PIN   8   /* P0.08：CSB/I2C_SEL，高 = I2C 模式 */
+#define ADDR_PIN  6   /* P0.06：SDO/ADDR，I2C 地址选择脚（不是 P0.04！） */
+#define INT_PIN   11  /* P0.11：INT，本程序不用 */
+#define LED_PIN   15  /* P1.15：板载 LED */
+#define AFE_ADDR  0x69u 
 
-#define LIS2DH12_REG_WHO_AM_I       0x0F
-#define LIS2DH12_REG_CTRL1          0x20
-#define LIS2DH12_REG_CTRL4          0x23
-#define LIS2DH12_REG_STATUS         0x27
-#define LIS2DH12_REG_OUT_X_L        0x28
-#define LIS2DH12_WHO_AM_I_VALUE     0x33
-#define LIS2DH12_AUTO_INCREMENT     BIT(7)
 
-//CTRL_REG1：100 Hz，X/Y/Z 启用，高分辨率模式。
-#define LIS2DH12_CTRL1_ODR_100_HZ   (5U << 4)
-#define LIS2DH12_CTRL1_XYZ_ENABLE   (BIT(0) | BIT(1) | BIT(2))
-#define LIS2DH12_CTRL1_VALUE        \
-	(LIS2DH12_CTRL1_ODR_100_HZ | LIS2DH12_CTRL1_XYZ_ENABLE)
+static const struct device *const gpio0_dev = DEVICE_DT_GET(DT_NODELABEL(gpio0));
+static const struct device *const gpio1_dev = DEVICE_DT_GET(DT_NODELABEL(gpio1));
+static struct i2c_dt_spec afe_bus = I2C_DT_SPEC_GET(DT_NODELABEL(afe));
 
-//CTRL_REG4：块数据更新，高分辨率，量程为±2g
-#define LIS2DH12_CTRL4_BDU          BIT(7)
-#define LIS2DH12_CTRL4_FS_2G        (0U << 4)
-#define LIS2DH12_CTRL4_HR           BIT(3)
-#define LIS2DH12_CTRL4_VALUE        \
-	(LIS2DH12_CTRL4_BDU | LIS2DH12_CTRL4_FS_2G | LIS2DH12_CTRL4_HR)
+//MAX30009 寄存器定义
+#define REG_STATUS1     0x00u
+#define REG_STATUS2     0x01u
+#define REG_FIFO_WR_PTR 0x08u
+#define REG_FIFO_RD_PTR 0x09u
+#define REG_FIFO_CNT1   0x0Au
+#define REG_FIFO_CNT2   0x0Bu
+#define REG_FIFO_DATA   0x0Cu
+#define REG_FIFO_CFG1   0x0Du
+#define REG_FIFO_CFG2   0x0Eu
+#define REG_SYSTEM_SYNC 0x10u
+#define REG_SYS_CFG1    0x11u
+#define REG_PIN_FUNC    0x12u
+#define REG_OUT_PIN     0x13u
+#define REG_I2C_BCAST   0x14u
+#define REG_PLL1        0x17u
+#define REG_PLL2        0x18u
+#define REG_PLL3        0x19u
+#define REG_PLL4        0x1Au
+#define REG_BIOZ_CFG1   0x20u /* 使能 / OSR */
+#define REG_BIOZ_CFG2   0x21u /* 数字滤波 / 阈值 */
+#define REG_BIOZ_CFG3   0x22u /* 激励电流 / 驱动模式 */
+#define REG_BIOZ_CFG4   0x23u /* fast start */
+#define REG_BIOZ_CFG5   0x24u /* AHPF / 增益 / INA */
+#define REG_BIOZ_CFG6   0x25u /* 放大器 / DC restore */
+#define REG_BIOZ_LOW_TH  0x26u
+#define REG_BIOZ_HIGH_TH 0x27u
+#define REG_BIOZ_CFG7   0x28u /* 斩波 / 相位 */
+#define REG_MUX1        0x41u
+#define REG_MUX2        0x42u
+#define REG_MUX3        0x43u
+#define REG_MUX4        0x44u /* 只读：BIST_R_ERR，不能写 */
+#define REG_DC_LEADS    0x50u
+#define REG_DC_LOFF_TH  0x51u
+#define REG_LEAD_BIAS   0x58u
+#define REG_INT_EN1     0x80u
+#define REG_INT_EN2     0x81u
+#define REG_PART_ID     0xFFu
 
-#define LIS2DH12_STATUS_DRDY_MASK   BIT_MASK(4)
-#define LIS2DH12_ACCEL_BURST_SIZE   7U
+#define PART_ID_EXPECTED 0x42u
 
-struct lis2dh12_sample {
-	uint8_t status;
+/* ---- STATUS1 ---- */
+#define ST1_PWR_RDY      BIT(0)
+#define ST1_PHASE_LOCK   BIT(1)
+#define ST1_PHASE_UNLOCK BIT(2)
+#define ST1_FREQ_LOCK    BIT(3)
+#define ST1_FREQ_UNLOCK  BIT(4)
+#define ST1_FIFO_RDY     BIT(5)
+#define ST1_A_FULL       BIT(7)
+#define ST1_LOCKED_MASK  (ST1_PHASE_LOCK | ST1_PHASE_UNLOCK | \
+			  ST1_FREQ_LOCK | ST1_FREQ_UNLOCK)
+#define ST1_LOCKED_OK    (ST1_PHASE_LOCK | ST1_FREQ_LOCK)
 
-	int16_t x_raw;
-	int16_t y_raw;
-	int16_t z_raw;
+/* ---- STATUS2 ---- */
+#define ST2_DRV_OOR   BIT(4)
+#define ST2_BIOZ_UNDR BIT(5)
+#define ST2_BIOZ_OVER BIT(6)
+#define ST2_LON       BIT(7)
 
-	int32_t x_mg;
-	int32_t y_mg;
-	int32_t z_mg;
+/* ---- SYS_CFG1 ---- */
+#define CFG1_RESET       BIT(0)
+#define CFG1_SHDN        BIT(1) /* 1 = 关断；正常必须为 0 */
+#define CFG1_DISABLE_I2C BIT(6) /* 置 1 后 I2C 失联，绝对不能写 */
+
+/* ---- FIFO_CFG2 ---- */
+#define FIFO_FLUSH    BIT(4)
+#define FIFO_STAT_CLR BIT(3)
+
+/* ---- FIFO 数据帧：24 bit = TAG[23:20] + DATA[19:0] ---- */
+#define FIFO_BYTES_PER_SAMPLE 3u
+#define FIFO_TAG_I            0x1u
+#define FIFO_TAG_Q            0x2u
+#define FIFO_MAX_WORDS        256u
+#define FIFO_TAG_SHIFT        20u
+#define FIFO_DATA_MASK        0x000FFFFFu
+#define FIFO_DATA_SIGN_BIT    19u
+
+/* =============================================================================
+ * 3. 时钟与数字参数
+ *    参考 32768 Hz × M(800) = 26.2144 MHz
+ *    K=3  → 激励分频 (1<<3)×32 = 256  → 激励 102.4 kHz
+ *    N=512、ADC_OSR=8<<6=512          → 采样 26.2144M/(512×512) = 100 sps
+ * =============================================================================
+ */
+#define REF_CLK_HZ        32768u
+#define PLL_MULTIPLIER    800u  /* MDIV 合法范围 427…854（32.768 kHz 参考） */
+#define PLL_DIV_EXP_K     3u    /* 分频指数，K=3 → ÷8 */
+#define PLL_NDIV_ENABLE   0u    /* 0 → N=512，1 → N=1024 */
+#define BIOZ_ADC_OSR_CODE 6u    /* ADC OSR = 8 << 6 = 512 */
+#define BIOZ_DAC_OSR_CODE 0u    /* DAC OSR = 32 << 0 = 32 */
+
+/* PLL1: [7:6]=MDIV[9:8] [5]=NDIV [4:1]=K [0]=PLL_EN */
+#define PLL1_STOP ((0xC0u) | (PLL_NDIV_ENABLE ? BIT(5) : 0u) | (PLL_DIV_EXP_K << 1))
+#define PLL1_RUN  (PLL1_STOP | BIT(0))
+#define PLL2_VAL  ((PLL_MULTIPLIER - 1u) & 0xFFu) /* 800-1=799=0x31F 的低 8 位 */
+//选用外部晶振
+#define USE_EXTERNAL_FCLK 1
+#define PLL4_VAL ((USE_EXTERNAL_FCLK ? BIT(6) : 0u) | BIT(5))
+
+/* BIOZ_CFG1: [7:6]=DAC_OSR [5:3]=ADC_OSR [2]=BG_EN [1]=Q_EN [0]=I_EN */
+#define BIOZ1_BG_ONLY ((BIOZ_DAC_OSR_CODE << 6) | (BIOZ_ADC_OSR_CODE << 3) | BIT(2))
+#define BIOZ1_RUN     (BIOZ1_BG_ONLY | BIT(1) | BIT(0))
+
+/* FIFO_CFG1 是"还剩多少空位时置 A_FULL"。ADI 参考驱动的算法是
+ * 写 (256 - 水位)：水位 32 → 写 224(0xE0)。本程序轮询计数，不依赖这个中断，
+ * 写错也只影响 INT 脚，不影响通信。 */
+#define FIFO_A_FULL_VAL 0xE0u
+
+/* 单次最多从 FIFO 取多少 word（3 字节/word）。
+ * 取 32 word = 96 字节，远小于 nRF TWIM 单次传输上限，也远小于 FIFO 深度。 */
+#define FIFO_READ_MAX_WORDS 32u
+
+/* =============================================================================
+ * 4. 配置表
+ * =============================================================================
+ * 说明：
+ *   - "CSV:" 是你快照里的原值；带 "修正" 的 4 行是按位定义改过的，原因都写在行尾。
+ *   - 0x44 不在这里：它是 BIST_R_ERR，只读。CSV 里的 0xCD 是读出来的值，
+ *     写进去会回读不一致，max30009_write_checked() 会直接报错退出。
+ * =============================================================================
+ */
+struct reg_val {
+	uint8_t reg;
+	uint8_t val;
 };
 
-static const struct i2c_dt_spec lis2dh12 =
-	I2C_DT_SPEC_GET(DT_NODELABEL(myaccel));
+static const struct reg_val max30009_cfg[] = {
+    {REG_SYS_CFG1,     0x00},   /* System Configuration 1 */
+    {REG_PIN_FUNC,      0x04},   /* Pin Functional Configuration */
+    {REG_OUT_PIN,       0x00},   /* Output Pin Configuration */
+    {REG_I2C_BCAST,     0x00},   /* I2C Broadcast Address */
 
-static int lis2dh12_write_reg(uint8_t reg, uint8_t value)
+    /* --- PLL组（PLL_EN 仍然在init里单独置位，不在此表） --- */
+	{REG_PLL1, 0x63},   /* mdiv=511, N=1024, K=2, PLL_EN=1 */
+	{REG_PLL2, 0xFF},
+	{REG_PLL3, 0x00},
+	{REG_PLL4, 0x20},
+
+    /* --- BioZ配置 --- */
+    {REG_BIOZ_CFG2,     0x1E},   /* BioZ Configuration 2 */
+    {REG_BIOZ_CFG3,     0x2C},   /* BioZ Configuration 3 */
+    {REG_BIOZ_CFG4,     0x00},   /* BioZ Configuration 4 */
+    {REG_BIOZ_CFG5,     0x73},   /* BioZ Configuration 5 */
+    {REG_BIOZ_CFG6,     0xCA},   /* BioZ Configuration 6 */
+    {REG_BIOZ_LOW_TH,   0x00},   /* BIOZ Low Threshold */
+    {REG_BIOZ_HIGH_TH,  0xFF},   /* BIOZ High Threshold */
+    {REG_BIOZ_CFG7,     0x02},   /* BioZ Configuration 7 */
+
+    /* --- MUX通道配置，MUX4暂时注释，上电阶段不写，等PLL锁定后再配置 --- */
+    {REG_MUX1,          0x02},   /* BioZ Mux Configuration 1 */
+    {REG_MUX2,          0x00},   /* BioZ Mux Configuration 2 */
+    {REG_MUX3,          0xA0},   /* BioZ Mux Configuration 3 */
+    // {REG_MUX4,          0xCD},   // 0x44 上电阶段写入失败，延后配置
+
+    /* --- 导联检测 / DC偏置 --- */
+    {REG_DC_LEADS,      0x00},   /* DC Leads Configuration */
+    {REG_DC_LOFF_TH,    0x00},   /* DC Lead Detect Threshold */
+    {REG_LEAD_BIAS,     0x07},   /* Lead Bias Configuration 1 */
+
+    /* --- 中断掩码 --- */
+    {REG_INT_EN1,       0x80},   /* Interrupt Enable 1 */
+    {REG_INT_EN2,       0x00},   /* Interrupt Enable 2 */
+};
+
+/* dump 列表；FIFO_DATA(0x0C) 是破坏性读，故意不放 */
+static const uint8_t dump_regs[] = {
+	0x00, 0x01, 0x08, 0x09, 0x0A, 0x0B, 0x0D, 0x0E,
+	0x10, 0x11, 0x12, 0x13, 0x14, 0x17, 0x18, 0x19, 0x1A,
+	0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28,
+	0x41, 0x42, 0x43, 0x44, 0x50, 0x51, 0x58, 0x80, 0x81,
+	0xFF,
+};
+
+/* =============================================================================
+ * 5. 传输层
+ * =============================================================================
+ * nRF 的 TWIM 把 ADDRESS_NACK / DATA_NACK 统一返回 -EIO，所以 -5 只说明
+ * "这一笔没被 ACK"，不区分是地址没人应答还是数据被拒绝。
+ */
+
+/*
+ * 有的 Maxim 器件不接受 repeated START，要求"写寄存器地址 → STOP → 再读"。
+ * 先按标准 repeated START 读，失败就退回两段式再试一次，成功就记住这个选择。
+ * 这样日志里能直接看出是不是时序问题。
+ */
+static bool split_read;
+
+static int reg_read(uint8_t reg, uint8_t *buf, size_t len)
 {
-	uint8_t buffer[2] = {reg, value};
-
-	return i2c_write_dt(&lis2dh12, buffer, sizeof(buffer));
+	int ret;
+	if (!split_read) {
+		ret = i2c_burst_read_dt(&afe_bus, reg, buf, len);
+		if (ret == 0) {
+			return 0;
+		}
+		if (i2c_write_dt(&afe_bus, &reg, 1) == 0 && i2c_read_dt(&afe_bus, buf, len) == 0) 
+		{
+			split_read = true;
+			printk("MAX30009: 该器件要 write+STOP+read，后续都用两段式\n");
+			return 0;
+		}
+		return ret;
+	}
+	ret = i2c_write_dt(&afe_bus, &reg, 1);
+	if (ret < 0) {
+		return ret;
+	}
+	return i2c_read_dt(&afe_bus, buf, len);
 }
 
-static int lis2dh12_init(void)
+static int reg_write(uint8_t reg, uint8_t value)
+{
+	uint8_t b[2] = {reg, value};
+
+	return i2c_write_dt(&afe_bus, b, sizeof(b));
+}
+
+static bool bus_ready(void)
+{
+	return i2c_is_ready_dt(&afe_bus);
+}
+
+/* =============================================================================
+ * 6. 读写封装
+ * =============================================================================
+ */
+static int max30009_write(uint8_t reg, uint8_t value)
+{
+	int ret = reg_write(reg, value);
+
+	if (ret < 0) {
+		printk("MAX30009: write 0x%02X=0x%02X failed (%d)\n", reg, value, ret);
+	}
+	return ret;
+}
+
+/* 写后回读比对：总线上的偶发位错误、只读寄存器都会在这一步暴露 */
+static int max30009_write_checked(uint8_t reg, uint8_t value)
+{
+	uint8_t back = 0;
+	int ret;
+
+	ret = reg_write(reg, value);
+	if (ret < 0) {
+		printk("MAX30009: write 0x%02X=0x%02X failed (%d)\n", reg, value, ret);
+		return ret;
+	}
+
+	ret = reg_read(reg, &back, 1);
+	if (ret < 0) {
+		printk("MAX30009: readback 0x%02X failed (%d)\n", reg, ret);
+		return ret;
+	}
+	if (back != value) {
+		printk("MAX30009: 0x%02X want 0x%02X got 0x%02X\n", reg, value, back);
+		return -EIO;
+	}
+	return 0;
+}
+
+static void max30009_dump(void)
+{
+	uint8_t v;
+	int ret;
+
+	printk("---- register dump ----\n");
+	for (size_t n = 0; n < ARRAY_SIZE(dump_regs); n++) {
+		ret = reg_read(dump_regs[n], &v, 1);
+		if (ret < 0) {
+			printk("0x%02X=ERR  ", dump_regs[n]);
+		} else {
+			printk("0x%02X=0x%02X ", dump_regs[n], v);
+		}
+		if ((n % 6u) == 5u) {
+			printk("\n");
+		}
+	}
+	printk("\n-----------------------\n");
+}
+
+/* 只在状态异常时调用，避免刷屏 */
+static void max30009_report_status(uint8_t s1, uint8_t s2)
+{
+	printk("  status:");
+	if (s1 & ST1_PWR_RDY) {
+		printk(" PWR_RDY");
+	}
+	if (s1 & ST1_FREQ_LOCK) {
+		printk(" FREQ_LOCK");
+	}
+	if (s1 & ST1_PHASE_LOCK) {
+		printk(" PHASE_LOCK");
+	}
+	if (s1 & ST1_FREQ_UNLOCK) {
+		printk(" FREQ_UNLOCK");
+	}
+	if (s1 & ST1_PHASE_UNLOCK) {
+		printk(" PHASE_UNLOCK");
+	}
+	if (s1 & ST1_A_FULL) {
+		printk(" A_FULL");
+	}
+	if (s2 & ST2_DRV_OOR) {
+		printk(" DRV_OOR");
+	}
+	if (s2 & ST2_BIOZ_OVER) {
+		printk(" BIOZ_OVER");
+	}
+	if (s2 & ST2_BIOZ_UNDR) {
+		printk(" BIOZ_UNDR");
+	}
+	if (s2 & ST2_LON) {
+		printk(" LON");
+	}
+	printk("\n");
+}
+
+//ADDR=1
+static int try_addresses(int addr_level)
 {
 	uint8_t id = 0;
+	gpio_pin_set(gpio0_dev, ADDR_PIN, addr_level);   /* ADDR=1 → 0x69 */
+	k_msleep(2);
+	afe_bus.addr = AFE_ADDR;
+	if (reg_read(REG_PART_ID, &id, 1) == 0 && id == PART_ID_EXPECTED) 
+	{
+		printk("MAX30009: 找到！ADDR=%d, 地址 0x%02X, PART_ID=0x%02X\n",
+		       addr_level, AFE_ADDR, id);
+		return 0;
+	}
+	printk("MAX30009: 0x%02X 无应答（ADDR=%d）\n", AFE_ADDR, addr_level);
+	return -ENODEV;
+}
+
+//芯片复位
+static int max30009_soft_reset(void)
+{
 	int ret;
-
-	if (!i2c_is_ready_dt(&lis2dh12)) {
-		printk("LIS2DH12: I2C bus is not ready\n");
-		return -ENODEV;
-	}
-	//The device needs a few milliseconds after power-on. 
-	k_sleep(K_MSEC(10));
-
-	ret = i2c_reg_read_byte_dt(&lis2dh12, LIS2DH12_REG_WHO_AM_I, &id);
-	if (ret < 0) {
-		printk("LIS2DH12: WHO_AM_I read failed: %d\n", ret);
+	ret = max30009_write(REG_BIOZ_CFG1, BIOZ1_BG_ONLY);
+	if (ret < 0) 
+	{
 		return ret;
 	}
-	if (id != LIS2DH12_WHO_AM_I_VALUE) {
-		printk("LIS2DH12: unexpected WHO_AM_I 0x%02X\n", id);
-		return -ENODEV;
+	ret = max30009_write(REG_SYS_CFG1, 0x00); /* SHDN=0 */
+	if (ret < 0) 
+	{
+		return ret;
 	}
-	// 在更改传感器配置时，请停止传感器
-	ret = lis2dh12_write_reg(LIS2DH12_REG_CTRL1, 0);
+	ret = max30009_write(REG_PLL4, PLL4_VAL & ~BIT(6)); /* 参考时钟先选内部 */
+	if (ret < 0) 
+	{
+		return ret;
+	}
+	ret = max30009_write(REG_PLL1, PLL1_STOP); /* PLL 关 */
+	if (ret < 0)
+	{
+		return ret;
+	}
+	k_msleep(10);
+	ret = max30009_write(REG_SYS_CFG1, CFG1_RESET);
+	if (ret < 0) 
+	{
+		return ret;
+	}
+	k_msleep(5);
+	return 0;
+}
+
+//初始化
+static int max30009_init(void)
+{
+	uint8_t id = 0;
+	uint8_t s1 = 0, s2 = 0;
+	int ret;
+	ret = max30009_soft_reset();
+	if (ret < 0) {
+		printk("MAX30009: 软复位失败 (%d)\n", ret);
+		return ret;
+	}
+	ret = reg_read(REG_PART_ID, &id, 1);
+	if (ret < 0 || id != PART_ID_EXPECTED) 
+	{
+		printk("MAX30009: 复位后 PART_ID 异常 (0x%02X, ret=%d)\n", id, ret);
+		return (ret < 0) ? ret : -EIO;
+	}
+	printk("MAX30009: 复位完成，PART_ID=0x%02X\n", id);
+	ret = max30009_write_checked(REG_PLL1, PLL1_STOP);
 	if (ret < 0) {
 		return ret;
 	}
-
-	ret = lis2dh12_write_reg(LIS2DH12_REG_CTRL4, LIS2DH12_CTRL4_VALUE);
+	max30009_dump();
+	/* 逐条写配置并回读校验；PLL_EN 和通道位留到最后单独开 */
+	for (size_t n = 0; n < ARRAY_SIZE(max30009_cfg); n++) {
+		ret = max30009_write_checked(max30009_cfg[n].reg, max30009_cfg[n].val);
+		if (ret < 0) {
+			printk("MAX30009: 配置在第 %u 条失败 (reg 0x%02X)\n",
+			       (unsigned int)n, max30009_cfg[n].reg);
+			return ret;
+		}
+	}
+	ret = max30009_write_checked(REG_BIOZ_CFG1, BIOZ1_BG_ONLY);
 	if (ret < 0) {
 		return ret;
 	}
-
-	ret = lis2dh12_write_reg(LIS2DH12_REG_CTRL1, LIS2DH12_CTRL1_VALUE);
+	k_msleep(20);   /* 等 bandgap 稳定 */
+	ret = max30009_write_checked(REG_PLL1, PLL1_RUN);
 	if (ret < 0) {
 		return ret;
 	}
-
-	k_sleep(K_MSEC(20));
-	printk("LIS2DH12: initialized, WHO_AM_I=0x%02X\n", id);
+	k_msleep(200);
+	ret = reg_read(REG_STATUS1, &s1, 1);
+	if (ret < 0) {
+		return ret;
+	}
+	printk("STATUS1(200ms)=0x%02X\n", s1);
+	if ((s1 & (ST1_FREQ_LOCK | ST1_PHASE_LOCK)) !=
+	    (ST1_FREQ_LOCK | ST1_PHASE_LOCK)) {
+		k_msleep(800);
+		ret = reg_read(REG_STATUS1, &s1, 1);
+		if (ret < 0) {
+			return ret;
+		}
+		printk("STATUS1(1s)=0x%02X\n", s1);
+	}
+	if ((s1 & (ST1_FREQ_LOCK | ST1_PHASE_LOCK)) !=
+	    (ST1_FREQ_LOCK | ST1_PHASE_LOCK)) {
+		printk("MAX30009: PLL 未锁定，STATUS1=0x%02X\n", s1);
+		return -ETIMEDOUT;
+	}
+	printk("MAX30009: PLL locked, STATUS1=0x%02X\n", s1);
+	ret = max30009_write(REG_SYSTEM_SYNC, 0x80);   /* 时序系统复位同步 */
+	if (ret < 0) {
+		return ret;
+	}
+	k_msleep(5);
+	ret = max30009_write_checked(REG_BIOZ_CFG1, BIOZ1_RUN);
+	uint8_t v = 0;
+	reg_read(REG_BIOZ_CFG1, &v, 1);
+	printk("BIOZ_CFG1=0x%02X (expect 0x37)\n", v);
+	if (ret < 0) {
+		return ret;
+	}
+	printk("MAX30009: 激励 %u Hz，采样 %u sps\n",
+	       (REF_CLK_HZ * PLL_MULTIPLIER) / ((1u << PLL_DIV_EXP_K) * 32u),
+	       (REF_CLK_HZ * PLL_MULTIPLIER) /
+		       ((512u << PLL_NDIV_ENABLE) * (8u << BIOZ_ADC_OSR_CODE)));
+	printk("MAX30009: STATUS1=0x%02X STATUS2=0x%02X\n", s1, s2);
 
 	return 0;
 }
-//在±2 g的高分辨率模式下，12位原始值的标度为
-//每计数单位约1000/1024毫克。
-static int32_t lis2dh12_raw_to_mg(int16_t raw)
+
+//读FIFO数据块
+struct bioz_block {
+	int32_t i_sum;
+	int32_t q_sum;
+	uint32_t i_cnt;
+	uint32_t q_cnt;
+	uint32_t other_cnt;
+	uint8_t status1;
+	uint8_t status2;
+	uint8_t fifo_ovf;
+};
+
+static uint8_t fifo_raw[FIFO_READ_MAX_WORDS * FIFO_BYTES_PER_SAMPLE];
+
+static int max30009_read(struct bioz_block *out)
 {
-	int32_t scaled = (int32_t)raw * 1000;
-
-	return (scaled >= 0) ? ((scaled + 512) / 1024)
-			     : ((scaled - 512) / 1024);
-}
-
-static void lis2dh12_get_axis(const uint8_t data[LIS2DH12_ACCEL_BURST_SIZE],
-			      size_t offset, int16_t *raw, int32_t *mg)
-{
-	int16_t value;
-
-	value = (int16_t)((uint16_t)data[offset] |
-			  ((uint16_t)data[offset + 1] << 8));
-
-	//LIS2DH 数据为左对齐；保留带符号的 12 位值。
-	*raw = value >> 4;
-	*mg = lis2dh12_raw_to_mg(*raw);
-}
-
-static int lis2dh12_read(struct lis2dh12_sample *sample)
-{
-	uint8_t data[LIS2DH12_ACCEL_BURST_SIZE];
+	uint8_t cnt1 = 0, cnt2 = 0;
+	uint16_t words, n;
 	int ret;
-	//
-    //在一次自动递增的传输中读取 STATUS 以及随后的 X/Y/Z 的 LSB/MSB。
-    //这样可以确保三个轴的数据均来自同一个采样点。
-    //
-	ret = i2c_burst_read_dt(
-		&lis2dh12,
-		LIS2DH12_REG_STATUS | LIS2DH12_AUTO_INCREMENT,
-		data,
-		sizeof(data));
-
+	memset(out, 0, sizeof(*out));
+	ret = reg_read(REG_FIFO_CNT1, &cnt1, 1);
 	if (ret < 0) {
 		return ret;
 	}
-
-	sample->status = data[0];
-	if ((sample->status & LIS2DH12_STATUS_DRDY_MASK) == 0U) {
+	ret = reg_read(REG_FIFO_CNT2, &cnt2, 1);
+	if (ret < 0) {
+		return ret;
+	}
+	out->fifo_ovf = cnt1 & 0x7Fu;
+	words = (uint16_t)(((uint16_t)(cnt1 & 0x80u) << 1) | cnt2);
+	if (words == 0u) {
 		return -EAGAIN;
 	}
-
-	lis2dh12_get_axis(data, 1, &sample->x_raw, &sample->x_mg);
-	lis2dh12_get_axis(data, 3, &sample->y_raw, &sample->y_mg);
-	lis2dh12_get_axis(data, 5, &sample->z_raw, &sample->z_mg);
-
-	return 0;
+	if (words > FIFO_MAX_WORDS) {
+		return -EOVERFLOW;
+	}
+	n = MIN(words, FIFO_READ_MAX_WORDS);
+	ret = reg_read(REG_FIFO_DATA, fifo_raw, (size_t)n * FIFO_BYTES_PER_SAMPLE);
+	if (ret < 0) {
+		return ret;
+	}
+	for (uint16_t k = 0; k < n; k++) {
+		const uint8_t *p = &fifo_raw[k * FIFO_BYTES_PER_SAMPLE];
+		uint32_t frame = ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2];
+		uint8_t tag = (uint8_t)(frame >> FIFO_TAG_SHIFT);
+		int32_t value = (int32_t)(frame & FIFO_DATA_MASK);
+		if (value & BIT(FIFO_DATA_SIGN_BIT)) { /* 20 位符号扩展 */
+			value |= (int32_t)0xFFF00000u;
+		}
+		if (tag == FIFO_TAG_I) {
+			out->i_sum += value;
+			out->i_cnt++;
+		} else if (tag == FIFO_TAG_Q) {
+			out->q_sum += value;
+			out->q_cnt++;
+		} else {
+			out->other_cnt++;
+		}
+	}
+	ret = reg_read(REG_STATUS1, &out->status1, 1);
+	if (ret < 0) {
+		return ret;
+	}
+	return reg_read(REG_STATUS2, &out->status2, 1);
 }
+
+/* 64 位整数开方，给 |Z| 用，避免 link libm */
+static uint32_t isqrt64(uint64_t v)
+{
+	uint64_t rem = v;
+	uint64_t root = 0;
+	uint64_t bit = 1ULL << 62;
+
+	while (bit > rem) {
+		bit >>= 2;
+	}
+	while (bit != 0u) {
+		if (rem >= root + bit) {
+			rem -= root + bit;
+			root = (root >> 1) + bit;
+		} else {
+			root >>= 1;
+		}
+		bit >>= 2;
+	}
+	return (uint32_t)root;
+}
+
+//主函数
 int main(void)
 {
-	struct lis2dh12_sample sample = {0};
+	gpio_pin_configure(gpio0_dev, CSB_PIN, GPIO_OUTPUT_HIGH);
+	gpio_pin_configure(gpio0_dev, ADDR_PIN, GPIO_OUTPUT_HIGH);
+	gpio_pin_configure(gpio1_dev, LED_PIN, GPIO_OUTPUT_INACTIVE);
+	gpio_pin_set(gpio1_dev, LED_PIN, 1);
+	struct bioz_block block;
+	uint32_t ok = 0, empty = 0, err = 0;
 	int ret;
-
-	ret = lis2dh12_init();
-	if (ret < 0) {
-		printk("LIS2DH12: initialization failed: %d\n", ret);
+	printk("\n*** MAX30009 BioZ 测试（I2C）***\n");
+	try_addresses(1);
+	ret = max30009_init();
+	if (ret < 0) 
+	{
+		printk("MAX30009: init failed (%d)\n", ret);
 		while (1) {
 			k_sleep(K_FOREVER);
 		}
 	}
+
 	while (1) {
-		ret = lis2dh12_read(&sample);
-		if (ret == 0) {
-			printk("raw X=%d Y=%d Z=%d | mg "
-			       "X=%d Y=%d Z=%d\n",
-			       sample.x_raw, sample.y_raw, sample.z_raw,
-			       sample.x_mg, sample.y_mg, sample.z_mg);
-		} else if (ret != -EAGAIN) {
-			printk("LIS2DH12: read failed: %d\n", ret);
+		ret = max30009_read(&block);
+
+		if (ret == -EAGAIN) {
+			empty++;
+		} else if (ret < 0) {
+			err++;
+			printk("MAX30009: read failed (%d)\n", ret);
+		} else {
+			int32_t i_mean = block.i_cnt ? (block.i_sum / (int32_t)block.i_cnt) : 0;
+			int32_t q_mean = block.q_cnt ? (block.q_sum / (int32_t)block.q_cnt) : 0;
+			uint64_t mag2 = (uint64_t)((int64_t)i_mean * i_mean) +
+					(uint64_t)((int64_t)q_mean * q_mean);
+
+			ok++;
+			printk("I=%8d Q=%8d | |Z|=%7u LSB | I:%3u Q:%3u ovf:%u\n",
+			       i_mean, q_mean, isqrt64(mag2), block.i_cnt, block.q_cnt,
+			       block.fifo_ovf);
+
+			if (block.other_cnt) {
+				printk("  注意：%u 个未知 TAG 帧（可能帧对齐错位）\n",
+				       block.other_cnt);
+			}
+			if (block.status2 & (ST2_DRV_OOR | ST2_BIOZ_OVER | ST2_BIOZ_UNDR)) {
+				max30009_report_status(block.status1, block.status2);
+			}
 		}
 
-		k_sleep(K_MSEC(100));
+		/* 每 10 次统计一次，区分"没数据"和"数据错" */
+		if (((ok + empty + err) % 10u) == 0u) {
+			printk("[stats] ok=%u empty=%u err=%u\n", ok, empty, err);
+			gpio_pin_toggle(gpio1_dev, LED_PIN);
+		}
+
+		k_msleep(100);
 	}
-} */
-
-
-
-
-/*i2c通信测试
-#include <stdio.h>
-#include <zephyr/kernel.h>
-#include <zephyr/logging/log.h>
-#include <zephyr/drivers/i2c.h>
-static struct i2c_dt_spec i2c0_struct = I2C_DT_SPEC_GET(DT_NODELABEL(myaccel));
-
-int main(void)
-{
-
-    while (1) 
-    {
-        uint8_t who_am_i = 0x0f;
-        uint8_t rx_buf[1] = {0};
-        i2c_write_dt(&i2c0_struct,&who_am_i, 1);   
-        i2c_read_dt(&i2c0_struct, rx_buf, 1);
-        k_sleep(K_SECONDS(0.1));
-    }
-    return 0;
-} */
-
-
-
-
-/* //串口异步收发（调用中断）
-#include <stdio.h>
-#include <zephyr/kernel.h>
-#include <zephyr/logging/log.h>
-#include <zephyr/drivers/uart.h>
-
-LOG_MODULE_REGISTER(main, LOG_LEVEL_DBG);//设置日志输出级别为DBG，低于该级别的日志不输出
-#define UART_NODE DT_NODELABEL(uart0)
-const struct device *uart_dev = DEVICE_DT_GET(UART_NODE);
-uint8_t rx_buf[10]={0};
-void uart_cd(const struct device *dev, 
-    struct uart_event *evt, void *user_data)
-{
-    switch(evt->type)
-    {
-        case UART_TX_DONE:
-            LOG_INF("整个TX缓冲区已传输完毕。");
-            break;
-        case UART_TX_ABORTED:
-            LOG_INF("由于超时或调用了uart_tx_abort，传输被中止");
-            break;
-        case UART_RX_RDY:
-            LOG_INF("已接收的数据已准备好进行处理。");
-            LOG_INF("接收到数据时：%s", evt->data.rx.buf);
-            break;
-        case UART_RX_BUF_REQUEST:
-            LOG_INF("驱动程序请求下一个缓冲区以实现连续接收");
-            break;
-        case UART_RX_BUF_RELEASED:
-            LOG_INF(" UART 驱动程序不再使用缓冲区");
-            break;
-        case  UART_RX_DISABLED: 
-            uart_rx_enable(uart_dev,rx_buf,sizeof(rx_buf),100);
-            LOG_INF(" RX 已被禁用，可以重新启用。");
-            break;
-        case  UART_RX_STOPPED:
-            LOG_INF("RX 因外部事件而停止运行。");
-            break;
-        default:
-            LOG_INF("Unknown event type: %d", evt->type);
-            break;
-    }
-
 }
-int main(void)
-{
-    struct uart_config cfg = {
-        .baudrate=115200,
-        .parity=UART_CFG_PARITY_NONE,//无奇偶校验
-        .stop_bits=UART_CFG_STOP_BITS_1,
-        .data_bits=UART_CFG_DATA_BITS_8,
-        .flow_ctrl=UART_CFG_FLOW_CTRL_NONE//无流控
-    };
-    // 配置UART
-    uart_configure(uart_dev, &cfg);
-    //配置回调函数
-    uart_callback_set(uart_dev, uart_cd, NULL);
-    uart_rx_enable(uart_dev,rx_buf,sizeof(rx_buf),100);
-    while (1) 
-    {
-        k_sleep(K_SECONDS(1));
-    }
-} */
-
-
-
-
-/* //中断流水灯
-//  * 1. 按键0触摸一次，4个LED流水点亮，按键0触摸第二次，3个LED流水点亮，按键0触摸第三次，2个LED流水点亮，按键0触摸第四次，LED0常亮，按键0触摸第五次，全部熄灭。
-//  * 2. 按键0触摸时有消抖处理。
-//  * 3. LED流水点亮的速度为200ms/盏。
-//  * 4. LED0常亮时不闪烁。
- 
-#include <zephyr/kernel.h>
-#include <zephyr/drivers/gpio.h>
-#include <zephyr/logging/log.h>
-#include <zephyr/sys/atomic.h>
-
-LOG_MODULE_REGISTER(main,LOG_LEVEL_ERR);//设置日志输出级别为ERR，低于该级别的日志不输出
-
-#define button0_NODE DT_NODELABEL(button0)
-#define LED_COUNT       4
-#define FLOW_DELAY_MS   200
-#define DEBOUNCE_MS     200
-
-static const struct gpio_dt_spec button0 =
-    GPIO_DT_SPEC_GET(button0_NODE, gpios);
-static const struct gpio_dt_spec leds[LED_COUNT] = {
-    GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios),
-    GPIO_DT_SPEC_GET(DT_ALIAS(led1), gpios),
-    GPIO_DT_SPEC_GET(DT_ALIAS(led2), gpios),
-    GPIO_DT_SPEC_GET(DT_ALIAS(led3), gpios),
-};
-static struct gpio_callback button0_cb;
-// 0=全灭，1=四灯流水，2=三灯流水，3=两灯流水，4=单灯常亮 
-static atomic_t mode;
-//用于通知主线程模式发生变化 
-K_SEM_DEFINE(mode_sem, 0, 1);
-// 只在 GPIO 中断中访问 
-static int64_t last_button0_ms;
-static bool has_button0ed;
-//触摸中断回调 
-static void button0_callback(const struct device *port,
-                           struct gpio_callback *cb,
-                           gpio_port_pins_t pins)
-{
-    ARG_UNUSED(port);
-    ARG_UNUSED(cb);
-    if ((pins & BIT(button0.pin)) == 0U) {
-        return;
-    }
-    int64_t now = k_uptime_get();
-    // 过滤短时间内重复产生的触摸中断 (消抖)
-    if (has_button0ed && (now - last_button0_ms < DEBOUNCE_MS)) {
-        return;
-    }
-    has_button0ed = true;
-    last_button0_ms = now;
-    int next_mode = (atomic_get(&mode) + 1) % 5;
-    atomic_set(&mode, next_mode);
-    k_sem_give(&mode_sem);
-}
-//index 对应的灯亮，其余灯灭；index=-1 时全灭
-static int show_led(int index)
-{
-    int ret;
-    // 先全部关闭，再开启目标灯
-    for (int i = 0; i < LED_COUNT; i++) 
-    {
-        ret = gpio_pin_set_dt(&leds[i], 0);
-        if (ret < 0) 
-        {
-            printk("LED%d off failed: %d\n", i, ret);
-            return ret;
-        }
-    }
-    if (index >= 0 && index < LED_COUNT) 
-    {
-        ret = gpio_pin_set_dt(&leds[index], 1);
-        if (ret < 0) {
-            printk("LED%d on failed: %d\n", index, ret);
-            return ret;
-        }
-    }
-    return 0;
-}
-int main(void)
-{
-    int ret;
-    // 检查并配置4个LED
-    for (int i = 0; i < LED_COUNT; i++) {
-        if (!gpio_is_ready_dt(&leds[i])) {
-            printk("LED%d is not ready\n", i);
-            return 0;
-        }
-        ret = gpio_pin_configure_dt(
-            &leds[i], GPIO_OUTPUT_INACTIVE);
-        if (ret < 0) {
-            printk("LED%d configure failed: %d\n", i, ret);
-            return 0;
-        }
-    }
-    if (!gpio_is_ready_dt(&button0)) {
-        printk("button0 is not ready\n");
-        return 0;
-    }
-    ret = gpio_pin_configure_dt(&button0, GPIO_INPUT);
-    if (ret < 0) {
-        printk("button0 configure failed: %d\n", ret);
-        return 0;
-    }
-    // 先注册回调，再启用中断
-    gpio_init_callback(&button0_cb,
-                       button0_callback,
-                       BIT(button0.pin));
-    ret = gpio_add_callback(button0.port, &button0_cb);
-    if (ret < 0) {
-        printk("Callback registration failed: %d\n", ret);
-        return 0;
-    }
-    ret = gpio_pin_interrupt_configure_dt(
-        &button0, GPIO_INT_EDGE_TO_ACTIVE);
-    if (ret < 0) {
-        printk("Interrupt configure failed: %d\n", ret);
-        return 0;
-    }
-    printk("Ready: button0 to change LED mode\n");
-
-    int previous_mode = -1;
-    int led_index = 0;
-    while (1) {
-        LOG_INF("HELLOWORLD");//cpu空闲时有输出
-        LOG_ERR("HELLOWORLD");//输出与优先级设置有关
-        // 读取当前模式
-        int current_mode = atomic_get(&mode);
-        // 切换模式时，从 LED0 重新开始
-        if (current_mode != previous_mode) {
-            previous_mode = current_mode;
-            led_index = 0;
-
-            printk("Mode: %d\n", current_mode);
-        }
-        if (current_mode == 0) {
-            // 全灭，等待下一次触摸
-            if (show_led(-1) < 0) {
-                return 0;
-            }
-            k_sem_take(&mode_sem, K_FOREVER);
-        } else if (current_mode == 4) {
-            // LED0 常亮，等待下一次触摸
-            if (show_led(0) < 0) {
-                return 0;
-            }
-            k_sem_take(&mode_sem, K_FOREVER);
-        } 
-        else {
-            // 模式1/2/3分别使用4/3/2个灯
-            int active_led_count = 5 - current_mode;
-
-            if (show_led(led_index) < 0){
-                return 0;
-            }
-            // 等待200 ms后切换下一盏灯。若触摸产生信号，则提前结束等待,回到循环顶部处理新模式。
-            ret = k_sem_take(&mode_sem, K_MSEC(FLOW_DELAY_MS));
-            if (ret == -EAGAIN) 
-            {
-                led_index =
-                    (led_index + 1) % active_led_count;
-            }
-        }
-    }
-
-    return 0;
-}
- */
-
-
-
-
-/* //zephyr GPIO中断回调,按键0触摸一次，打印“button0 pressed!”。
-#include <zephyr/kernel.h>
-#include <zephyr/drivers/gpio.h>
-#include <zephyr/sys/atomic.h>
-#define button0_NODE DT_NODELABEL(button0)//定义别名
-struct gpio_dt_spec button0_struct = GPIO_DT_SPEC_GET(button0_NODE, gpios);//定义GPIO属性
-struct gpio_callback gpio_cb_struct={0};//定义回调函数结构体
-
-    //  @brief 回调函数
-    //  @param port Device struct for the GPIO device.
-    //  @param cb Original struct gpio_callback owning this handler
-    //  @param pi    ns Mask of pins that triggers the callback handler
-     
-    void gpio_callback (const struct device *port,
-					struct gpio_callback *cb,
-					gpio_port_pins_t pins)             
-{
-    if(pins==BIT(button0_struct.pin))//判断是否是按键引脚触发的中断
-    {
-        printk("button0 pressed!\n");
-    }
-}
-int main(void)
-{
-    // 检查按键硬件外设是否就绪
-    if (gpio_is_ready_dt(&button0_struct) == false) 
-    {
-        printk("button0 is not ready\n");
-        // printk——zephyr内核的打印函数(库较小)，printf——C标准库的打印函数
-        return 0; // 按键设备异常，直接退出main
-    }
-    // 配置为输入
-    gpio_pin_configure_dt(&button0_struct, GPIO_INPUT);
-    //配置为上升沿触发中断
-    gpio_pin_interrupt_configure_dt(&button0_struct, GPIO_INT_EDGE_TO_ACTIVE);
-    //初始化回调函数
-    gpio_init_callback(&gpio_cb_struct, gpio_callback, BIT(button0_struct.pin));
-    //注册回调函数
-    gpio_add_callback(button0_struct.port, &gpio_cb_struct);
-    // 读取一次按键当前电平
-    int res = gpio_pin_get_dt(&button0_struct);
-    printk("button0 state: %d\n", res);
-
-    return 0;
-}   */
-
-
-
-
-/*  //LED0闪烁
-#include <zephyr/kernel.h>
-#include <zephyr/drivers/gpio.h>
-#include <zephyr/sys/atomic.h>
-//获取设备树里 button0 节点的GPIO信息
-#define button0_NODE DT_NODELABEL(button0)  
-struct gpio_dt_spec button0_struct=GPIO_DT_SPEC_GET(button0_NODE,gpios);
-
-// 获取设备树里 led0 节点的GPIO信息
-#define LED_NODE DT_NODELABEL(led0)
-struct gpio_dt_spec led_struct=GPIO_DT_SPEC_GET(LED_NODE,gpios);
-int main(void)
-{
-    // 检查按键硬件外设是否就绪
-    if (gpio_is_ready_dt(&button0_struct)==false) 
-    {
-        printf("button0 is not ready\n");
-        return 0; // 按键设备异常，直接退出main
-    }
-    // 检查LED硬件外设是否就绪
-    if (gpio_is_ready_dt(&led_struct)==false) 
-    {
-        printf("LED is not ready\n");
-        return 0; // LED设备异常，直接退出main
-    }
-
-    // 配置按键：输入、低电平有效、上拉电阻
-    gpio_pin_configure_dt(&button0_struct,GPIO_INPUT|GPIO_ACTIVE_LOW|GPIO_PULL_UP);
-    // 配置LED：输出、低电平有效
-    gpio_pin_configure_dt(&led_struct,GPIO_OUTPUT|GPIO_ACTIVE_LOW);
-    // 读取一次按键当前电平（**只在程序启动瞬间读一次，不在循环内**）
-    int res=gpio_pin_get_dt(&button0_struct);
-
-    // 设置LED逻辑值=1
-    // 因为配置了GPIO_ACTIVE_LOW，逻辑1 → 引脚输出低电平
-    gpio_pin_set_dt(&led_struct,1);
-
-    // 无限循环
-    while (1)
-    {
-        gpio_pin_toggle_dt(&led_struct); // 翻转LED逻辑电平
-        k_sleep(K_SECONDS(1));            // 线程休眠1秒，让出CPU
-    }
-    return 0;
-}
- */
